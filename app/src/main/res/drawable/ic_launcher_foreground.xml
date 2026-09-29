@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Outer radar pulse ring -->
+    <path
+        android:strokeWidth="1.5"
+        android:strokeColor="#60A5FA"
+        android:pathData="M54,54 m-22,0 a22,22 0 1,0 44,0 a22,22 0 1,0 -44,0" />
+
+    <!-- Targeting reticle notches -->
+    <path
+        android:strokeWidth="2"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:pathData="M54,26 L54,32 M54,76 L54,82 M26,54 L32,54 M76,54 L82,54" />
+
+    <!-- Main GPS Pin Shadow / Glow Base -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M54,30 C44.06,30 36,38.06 36,48 C36,60.5 52.2,74.8 52.9,75.4 C53.2,75.7 53.6,75.8 54,75.8 C54.4,75.8 54.8,75.7 55.1,75.4 C55.8,74.8 72,60.5 72,48 C72,38.06 63.94,30 54,30 Z" />
+
+    <!-- Pin Inner Gradient Highlight -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,38 C48.48,38 44,42.48 44,48 C44,53.52 48.48,58 54,58 C59.52,58 64,53.52 64,48 C64,42.48 59.52,38 54,38 Z" />
+
+    <!-- Pin Core Center Dot -->
+    <path
+        android:fillColor="#1E1B4B"
+        android:pathData="M54,44 C51.79,44 50,45.79 50,48 C50,50.21 51.79,52 54,52 C56.21,52 58,50.21 58,48 C58,45.79 56.21,44 54,44 Z" />
+</vector>

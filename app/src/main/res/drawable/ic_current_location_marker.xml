@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="36dp"
+    android:height="36dp"
+    android:viewportWidth="36"
+    android:viewportHeight="36">
+    <!-- Outer subtle blue aura -->
+    <path
+        android:fillColor="#332563EB"
+        android:pathData="M18,18m-16,0a16,16 0 1,0 32,0a16,16 0 1,0 -32,0" />
+    <!-- White border ring -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M18,18m-9,0a9,9 0 1,0 18,0a9,9 0 1,0 -18,0" />
+    <!-- Inner Blue Dot -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M18,18m-6.5,0a6.5,6.5 0 1,0 13,0a6.5,6.5 0 1,0 -13,0" />
+</vector>
