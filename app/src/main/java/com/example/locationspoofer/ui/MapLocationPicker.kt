@@ -1,5 +1,7 @@
 package com.example.locationspoofer.ui
 
+import android.graphics.Color as AndroidColor
+import android.graphics.Paint
 import android.view.MotionEvent
 import android.view.View
 import androidx.compose.foundation.background
@@ -7,7 +9,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -43,15 +44,19 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.locationspoofer.R
+import com.example.locationspoofer.route.RoadRoute
+import com.example.locationspoofer.route.RoutePoint
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Overlay
+import org.osmdroid.views.overlay.Polyline
 
 /**
  * High-performance OpenStreetMap (osmdroid) location picker composable.
- * Supports tap-to-pin, real device location overlay, and quick locate-me controls.
+ * Supports tap-to-pin, road geometry polyline rendering, rotating directional simulation marker,
+ * start/end markers, and camera-follow capabilities.
  */
 @Composable
 fun MapLocationPicker(
@@ -62,12 +67,17 @@ fun MapLocationPicker(
     currentDeviceLocation: Pair<Double, Double>? = null,
     isLocating: Boolean = false,
     onLocateMeClicked: () -> Unit = {},
-    cameraTarget: Pair<Double, Double>? = null
+    cameraTarget: Pair<Double, Double>? = null,
+    route: RoadRoute? = null,
+    startPoint: RoutePoint? = null,
+    endPoint: RoutePoint? = null,
+    movingPoint: RoutePoint? = null,
+    movingBearing: Float? = null,
+    followLocation: Boolean = true
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // High-speed OpenStreetMap Humanitarian / France multi-server CDN (No blocks, zero API keys)
     val tileSource = remember {
         XYTileSource(
             "OSM_HOT_FAST",
@@ -88,51 +98,84 @@ fun MapLocationPicker(
     val mapView = remember {
         MapView(context).apply {
             setTileSource(tileSource)
-
-            // GPU Hardware Acceleration & Smooth Rendering
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
             isTilesScaledToDpi = true
             isFlingEnabled = true
             setMultiTouchControls(true)
 
-            // Constraints & Performance optimizations
             minZoomLevel = 3.0
             maxZoomLevel = 19.5
             isHorizontalMapRepetitionEnabled = true
             isVerticalMapRepetitionEnabled = false
 
-            // Initial view
             controller.setZoom(14.0)
             controller.setCenter(GeoPoint(selectedLatitude, selectedLongitude))
         }
     }
 
+    // Static target pin marker
     val targetMarker = remember {
         Marker(mapView).apply {
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            title = "Target Mock Location"
+            title = "Target Pin"
             val drawable = ContextCompat.getDrawable(context, R.drawable.ic_target_pin)
-            if (drawable != null) {
-                icon = drawable
-            }
+            if (drawable != null) icon = drawable
         }
     }
 
+    // Real device location marker
     val currentLocMarker = remember {
         Marker(mapView).apply {
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             title = "Current Device Location"
             val drawable = ContextCompat.getDrawable(context, R.drawable.ic_current_location_marker)
-            if (drawable != null) {
-                icon = drawable
-            }
+            if (drawable != null) icon = drawable
         }
     }
 
-    // Gesture Overlay for tap/long-press
-    LaunchedEffect(mapView) {
-        mapView.overlays.clear()
+    // Route Start Pin (Green)
+    val startMarker = remember {
+        Marker(mapView).apply {
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            title = "Route Start"
+            val drawable = ContextCompat.getDrawable(context, R.drawable.ic_route_start_pin)
+            if (drawable != null) icon = drawable
+        }
+    }
 
+    // Route End Pin (Red)
+    val endMarker = remember {
+        Marker(mapView).apply {
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            title = "Route Destination"
+            val drawable = ContextCompat.getDrawable(context, R.drawable.ic_route_end_pin)
+            if (drawable != null) icon = drawable
+        }
+    }
+
+    // Moving Simulation Pointer (Directional Arrow with Rotation)
+    val movingMarker = remember {
+        Marker(mapView).apply {
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            title = "Simulated Vehicle"
+            val drawable = ContextCompat.getDrawable(context, R.drawable.ic_navigation_pointer)
+            if (drawable != null) icon = drawable
+        }
+    }
+
+    // Route Polyline
+    val routePolyline = remember {
+        Polyline(mapView).apply {
+            outlinePaint.color = AndroidColor.parseColor("#0284C7")
+            outlinePaint.strokeWidth = 14f
+            outlinePaint.strokeCap = Paint.Cap.ROUND
+            outlinePaint.strokeJoin = Paint.Join.ROUND
+            outlinePaint.isAntiAlias = true
+        }
+    }
+
+    // Setup basic overlays
+    LaunchedEffect(mapView) {
         val gestureOverlay = object : Overlay() {
             override fun onSingleTapConfirmed(e: MotionEvent, map: MapView): Boolean {
                 val p = map.projection.fromPixels(e.x.toInt(), e.y.toInt())
@@ -155,11 +198,18 @@ fun MapLocationPicker(
         mapView.overlays.add(targetMarker)
     }
 
-    // Update target marker position
-    LaunchedEffect(selectedLatitude, selectedLongitude) {
-        val geoPoint = GeoPoint(selectedLatitude, selectedLongitude)
-        targetMarker.position = geoPoint
-        targetMarker.snippet = String.format("%.4f, %.4f", selectedLatitude, selectedLongitude)
+    // Update target marker position (hidden if moving simulation is active)
+    LaunchedEffect(selectedLatitude, selectedLongitude, movingPoint) {
+        if (movingPoint == null) {
+            val geoPoint = GeoPoint(selectedLatitude, selectedLongitude)
+            targetMarker.position = geoPoint
+            targetMarker.snippet = String.format("%.4f, %.4f", selectedLatitude, selectedLongitude)
+            if (!mapView.overlays.contains(targetMarker)) {
+                mapView.overlays.add(targetMarker)
+            }
+        } else {
+            mapView.overlays.remove(targetMarker)
+        }
         mapView.invalidate()
     }
 
@@ -170,8 +220,7 @@ fun MapLocationPicker(
             currentLocMarker.position = GeoPoint(cLat, cLon)
             currentLocMarker.snippet = String.format("Current GPS: %.4f, %.4f", cLat, cLon)
             if (!mapView.overlays.contains(currentLocMarker)) {
-                // Add device marker below target pin
-                mapView.overlays.add(mapView.overlays.size - 1, currentLocMarker)
+                mapView.overlays.add(currentLocMarker)
             }
         } else {
             mapView.overlays.remove(currentLocMarker)
@@ -179,7 +228,60 @@ fun MapLocationPicker(
         mapView.invalidate()
     }
 
-    // Animate camera when target changes externally
+    // Update Route Polyline
+    LaunchedEffect(route) {
+        if (route != null && route.points.size >= 2) {
+            val geoPoints = route.points.map { GeoPoint(it.latitude, it.longitude) }
+            routePolyline.setPoints(geoPoints)
+            if (!mapView.overlays.contains(routePolyline)) {
+                mapView.overlays.add(0, routePolyline)
+            }
+        } else {
+            mapView.overlays.remove(routePolyline)
+        }
+        mapView.invalidate()
+    }
+
+    // Update Start and End Markers
+    LaunchedEffect(startPoint, endPoint) {
+        if (startPoint != null) {
+            startMarker.position = GeoPoint(startPoint.latitude, startPoint.longitude)
+            if (!mapView.overlays.contains(startMarker)) mapView.overlays.add(startMarker)
+        } else {
+            mapView.overlays.remove(startMarker)
+        }
+
+        if (endPoint != null) {
+            endMarker.position = GeoPoint(endPoint.latitude, endPoint.longitude)
+            if (!mapView.overlays.contains(endMarker)) mapView.overlays.add(endMarker)
+        } else {
+            mapView.overlays.remove(endMarker)
+        }
+        mapView.invalidate()
+    }
+
+    // Update Moving Simulation Pointer and Camera Follow
+    LaunchedEffect(movingPoint, movingBearing, followLocation) {
+        if (movingPoint != null) {
+            val movingGeoPoint = GeoPoint(movingPoint.latitude, movingPoint.longitude)
+            movingMarker.position = movingGeoPoint
+            // In osmdroid, rotation is clockwise degrees from top
+            movingMarker.rotation = movingBearing ?: 0f
+            if (!mapView.overlays.contains(movingMarker)) {
+                mapView.overlays.add(movingMarker)
+            }
+
+            if (followLocation) {
+                // Keep moving location centered while preserving user zoom level
+                mapView.controller.setCenter(movingGeoPoint)
+            }
+        } else {
+            mapView.overlays.remove(movingMarker)
+        }
+        mapView.invalidate()
+    }
+
+    // Animate camera when target changes externally (e.g. from search, bookmark, or fit)
     LaunchedEffect(cameraTarget) {
         cameraTarget?.let { (lat, lon) ->
             val geoPoint = GeoPoint(lat, lon)
@@ -206,7 +308,7 @@ fun MapLocationPicker(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(300.dp)
+            .height(320.dp)
             .clip(RoundedCornerShape(18.dp))
             .border(
                 1.dp,
@@ -219,7 +321,7 @@ fun MapLocationPicker(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Floating Target Coordinates Badge (Top-Left)
+        // Floating Target / Moving Coordinates Badge (Top-Left)
         Surface(
             modifier = Modifier
                 .align(Alignment.TopStart)
@@ -237,10 +339,14 @@ fun MapLocationPicker(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFF0284C7))
+                        .background(if (movingPoint != null) Color(0xFF16A34A) else Color(0xFF0284C7))
                 )
                 Text(
-                    text = String.format("Target: %.4f, %.4f", selectedLatitude, selectedLongitude),
+                    text = if (movingPoint != null) {
+                        String.format("Moving: %.4f, %.4f (%d°)", movingPoint.latitude, movingPoint.longitude, movingBearing?.toInt() ?: 0)
+                    } else {
+                        String.format("Pin: %.4f, %.4f", selectedLatitude, selectedLongitude)
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.SemiBold,
@@ -249,7 +355,7 @@ fun MapLocationPicker(
             }
         }
 
-        // "Locate Me / My Location" Action Button (Top-Right)
+        // "Locate Me" Action Button (Top-Right)
         Surface(
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -281,8 +387,8 @@ fun MapLocationPicker(
             }
         }
 
-        // Live Current Location Indicator Banner (Bottom-Left if available)
-        if (currentDeviceLocation != null) {
+        // Live Real GPS Location Chip (Bottom-Left if available and not in moving simulation)
+        if (currentDeviceLocation != null && movingPoint == null) {
             val (cLat, cLon) = currentDeviceLocation
             Surface(
                 modifier = Modifier
@@ -317,7 +423,7 @@ fun MapLocationPicker(
             }
         }
 
-        // Tap Hint (Bottom-End)
+        // Tap Hint / Route Info (Bottom-End)
         Surface(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
@@ -326,9 +432,14 @@ fun MapLocationPicker(
             color = Color.Black.copy(alpha = 0.65f)
         ) {
             Text(
-                text = "Tap / Drag to reposition",
+                text = if (route != null) {
+                    String.format("Road: %.2f km", route.distanceKm)
+                } else {
+                    "Tap / Hold map to pick"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
                 color = Color.White,
                 modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
             )

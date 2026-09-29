@@ -39,12 +39,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -71,6 +75,9 @@ import com.example.locationspoofer.location.LocationSearchManager
 import com.example.locationspoofer.location.LocationValidator
 import com.example.locationspoofer.model.LocationSearchResult
 import com.example.locationspoofer.model.SpoofLocation
+import com.example.locationspoofer.route.RoadRoute
+import com.example.locationspoofer.route.RouteManager
+import com.example.locationspoofer.route.RoutePoint
 import com.example.locationspoofer.service.LocationForegroundService
 import com.example.locationspoofer.service.ServiceStatus
 import kotlinx.coroutines.launch
@@ -87,10 +94,25 @@ fun MainScreen(modifier: Modifier = Modifier) {
     val savedLocations by repository.savedLocations.collectAsStateWithLifecycle()
     val serviceStatus by LocationForegroundService.serviceStatus.collectAsStateWithLifecycle()
 
+    // Mode Selection: 0 = Static Mock, 1 = Road Route Simulation
+    var selectedModeTab by remember { mutableIntStateOf(0) }
+
+    // Static Location Inputs
     var latitudeText by remember { mutableStateOf("13.0827") }
     var longitudeText by remember { mutableStateOf("80.2707") }
     var accuracyText by remember { mutableStateOf("5") }
     var localError by remember { mutableStateOf<String?>(null) }
+
+    // Route Simulation Inputs
+    var startLatText by remember { mutableStateOf("13.0827") }
+    var startLonText by remember { mutableStateOf("80.2707") }
+    var endLatText by remember { mutableStateOf("13.0600") }
+    var endLonText by remember { mutableStateOf("80.2400") }
+    var calculatedRoute by remember { mutableStateOf<RoadRoute?>(null) }
+    var isCalculatingRoute by remember { mutableStateOf(false) }
+    var routingError by remember { mutableStateOf<String?>(null) }
+    var selectedSpeedKmh by remember { mutableFloatStateOf(40f) }
+    var followLocation by remember { mutableStateOf(true) }
 
     // Search state
     var searchQuery by remember { mutableStateOf("") }
@@ -108,9 +130,15 @@ fun MainScreen(modifier: Modifier = Modifier) {
     // Save Location Dialog State
     var showSaveDialog by remember { mutableStateOf(false) }
 
-    val isRunning = serviceStatus is ServiceStatus.Running
-    val validationResult = LocationValidator.validate(latitudeText, longitudeText, accuracyText)
-    val isInputValid = validationResult is LocationValidator.ValidationResult.Valid
+    val isRunningStatic = serviceStatus is ServiceStatus.Running
+    val isSimulatingRoute = serviceStatus is ServiceStatus.SimulatingRoute
+    val isAnyServiceRunning = isRunningStatic || isSimulatingRoute
+    val staticValidationResult = LocationValidator.validate(latitudeText, longitudeText, accuracyText)
+    val isStaticInputValid = staticValidationResult is LocationValidator.ValidationResult.Valid
+
+    // Extract active simulation progress if simulating
+    val activeSimulationProgress = (serviceStatus as? ServiceStatus.SimulatingRoute)?.progress
+    val isSimulationPaused = (serviceStatus as? ServiceStatus.SimulatingRoute)?.isPaused ?: false
 
     // Required permissions launcher
     val permissionsToRequest = remember {
@@ -129,7 +157,6 @@ fun MainScreen(modifier: Modifier = Modifier) {
         val fineLocationGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
         if (fineLocationGranted) {
             localError = null
-            // Fetch current device location
             coroutineScope.launch {
                 val loc = DeviceLocationHelper.getCurrentLocation(context)
                 if (loc != null) {
@@ -171,7 +198,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    fun onStartClicked() {
+    fun onStartStaticClicked() {
         when (val res = LocationValidator.validate(latitudeText, longitudeText, accuracyText)) {
             is LocationValidator.ValidationResult.Invalid -> {
                 localError = res.reason
@@ -198,6 +225,63 @@ fun MainScreen(modifier: Modifier = Modifier) {
     fun onStopClicked() {
         localError = null
         LocationForegroundService.stopService(context)
+    }
+
+    fun onCalculateRouteClicked() {
+        val sLat = startLatText.trim().toDoubleOrNull()
+        val sLon = startLonText.trim().toDoubleOrNull()
+        val eLat = endLatText.trim().toDoubleOrNull()
+        val eLon = endLonText.trim().toDoubleOrNull()
+
+        if (sLat == null || sLat < -90.0 || sLat > 90.0 || sLon == null || sLon < -180.0 || sLon > 180.0) {
+            routingError = "Please enter valid Start coordinates (-90 to 90, -180 to 180)."
+            return
+        }
+        if (eLat == null || eLat < -90.0 || eLat > 90.0 || eLon == null || eLon < -180.0 || eLon > 180.0) {
+            routingError = "Please enter valid Destination coordinates (-90 to 90, -180 to 180)."
+            return
+        }
+
+        routingError = null
+        coroutineScope.launch {
+            isCalculatingRoute = true
+            val result = RouteManager.calculateRoute(sLat, sLon, eLat, eLon)
+            isCalculatingRoute = false
+
+            result.fold(
+                onSuccess = { route ->
+                    calculatedRoute = route
+                    routingError = null
+                    cameraTarget = Pair(sLat, sLon)
+                    searchMessage = String.format(Locale.US, "✓ Road route calculated: %.2f km along actual roads", route.distanceKm)
+                },
+                onFailure = { error ->
+                    calculatedRoute = null
+                    routingError = error.message ?: "Unable to find a road route between the selected locations."
+                }
+            )
+        }
+    }
+
+    fun onStartSimulationClicked() {
+        val route = calculatedRoute ?: return
+        val fineLocationGranted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (fineLocationGranted) {
+            localError = null
+            routingError = null
+            LocationForegroundService.startRouteSimulation(
+                context = context,
+                route = route,
+                speedKmh = selectedSpeedKmh,
+                accuracy = accuracyText.toFloatOrNull() ?: 5.0f
+            )
+        } else {
+            permissionLauncher.launch(permissionsToRequest)
+        }
     }
 
     fun applyCoordinates(lat: Double, lon: Double, centerCamera: Boolean = true) {
@@ -261,7 +345,6 @@ fun MainScreen(modifier: Modifier = Modifier) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // App Logo Icon Badge
                 Box(
                     modifier = Modifier
                         .size(46.dp)
@@ -307,15 +390,46 @@ fun MainScreen(modifier: Modifier = Modifier) {
                         }
                     }
                     Text(
-                        text = "OpenStreetMap GPS Mock Provider",
+                        text = "OpenStreetMap GPS Mock Provider & Road Simulator",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
 
-            // Status Card (Publishing Status)
+            // Status Card (Publishing / Simulation Status)
             StatusCard(serviceStatus = serviceStatus, localError = localError)
+
+            // Mode Selector Tabs (Static Location vs Road Route Simulation)
+            TabRow(
+                selectedTabIndex = selectedModeTab,
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                contentColor = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clip(RoundedCornerShape(14.dp))
+            ) {
+                Tab(
+                    selected = selectedModeTab == 0,
+                    onClick = { selectedModeTab = 0 },
+                    text = {
+                        Text(
+                            text = "📍 Static Mock",
+                            fontWeight = if (selectedModeTab == 0) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 13.sp
+                        )
+                    }
+                )
+                Tab(
+                    selected = selectedModeTab == 1,
+                    onClick = { selectedModeTab = 1 },
+                    text = {
+                        Text(
+                            text = "🚗 Road Simulation",
+                            fontWeight = if (selectedModeTab == 1) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 13.sp
+                        )
+                    }
+                )
+            }
 
             // Search / Coordinate Quick Paste Bar
             ElevatedCard(
@@ -493,7 +607,6 @@ fun MainScreen(modifier: Modifier = Modifier) {
                                             )
                                         }
 
-                                        // Quick bookmark button
                                         IconButton(
                                             onClick = {
                                                 repository.saveLocation(
@@ -521,7 +634,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
                 }
             }
 
-            // OpenStreetMap Location Picker Card with Current Location Overlay
+            // Interactive OSM Map (Supports Static Pin + OSRM Polyline + Directional Rotating Vehicle)
             ElevatedCard(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(18.dp),
@@ -539,7 +652,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Interactive OSM Map",
+                            text = if (selectedModeTab == 1) "OSRM Road Simulation Map" else "Interactive OSM Map",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -575,7 +688,6 @@ fun MainScreen(modifier: Modifier = Modifier) {
                         onLocationSelected = { lat, lon ->
                             mapLatitude = lat
                             mapLongitude = lon
-                            // Automatically update the input text fields on map tap
                             latitudeText = String.format(Locale.US, "%.6f", lat)
                             longitudeText = String.format(Locale.US, "%.6f", lon)
                             localError = null
@@ -583,7 +695,13 @@ fun MainScreen(modifier: Modifier = Modifier) {
                         currentDeviceLocation = currentDeviceLocation,
                         isLocating = isLocating,
                         onLocateMeClicked = { handleLocateMe() },
-                        cameraTarget = cameraTarget
+                        cameraTarget = cameraTarget,
+                        route = calculatedRoute,
+                        startPoint = calculatedRoute?.startPoint,
+                        endPoint = calculatedRoute?.endPoint,
+                        movingPoint = activeSimulationProgress?.currentPoint,
+                        movingBearing = activeSimulationProgress?.bearing,
+                        followLocation = followLocation
                     )
 
                     Row(
@@ -595,7 +713,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
                             modifier = Modifier
                                 .weight(1f)
                                 .height(44.dp),
-                            enabled = !isRunning,
+                            enabled = !isAnyServiceRunning,
                             shape = RoundedCornerShape(10.dp)
                         ) {
                             Text("Use Map Pin")
@@ -611,7 +729,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(44.dp),
-                                enabled = !isRunning,
+                                enabled = !isAnyServiceRunning,
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Text("Use Real GPS")
@@ -629,6 +747,190 @@ fun MainScreen(modifier: Modifier = Modifier) {
                         }
                     }
                 }
+            }
+
+            // CONTROLS BASED ON SELECTED MODE TAB
+            if (selectedModeTab == 0) {
+                // ================= MODE 1: STATIC MOCK LOCATION =================
+                ElevatedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.elevatedCardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Target Coordinates",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+
+                            TextButton(
+                                onClick = { showSaveDialog = true },
+                                enabled = isStaticInputValid && !isAnyServiceRunning
+                            ) {
+                                Text("★ Bookmark Spot")
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = latitudeText,
+                            onValueChange = {
+                                latitudeText = it
+                                localError = null
+                            },
+                            label = { Text("Latitude (°)") },
+                            placeholder = { Text("e.g. 13.0827 (-90 to 90)") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isAnyServiceRunning
+                        )
+
+                        OutlinedTextField(
+                            value = longitudeText,
+                            onValueChange = {
+                                longitudeText = it
+                                localError = null
+                            },
+                            label = { Text("Longitude (°)") },
+                            placeholder = { Text("e.g. 80.2707 (-180 to 180)") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isAnyServiceRunning
+                        )
+
+                        OutlinedTextField(
+                            value = accuracyText,
+                            onValueChange = {
+                                accuracyText = it
+                                localError = null
+                            },
+                            label = { Text("Accuracy (meters)") },
+                            placeholder = { Text("e.g. 5 (> 0)") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isAnyServiceRunning
+                        )
+                    }
+                }
+
+                // Start & Stop Controls for Static Mocking
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(
+                        onClick = { onStartStaticClicked() },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(54.dp),
+                        enabled = isStaticInputValid && !isAnyServiceRunning,
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(
+                            text = "Start Mock Location",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = { onStopClicked() },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(54.dp),
+                        enabled = isRunningStatic,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Text(
+                            text = "Stop Mock Location",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                    }
+                }
+            } else {
+                // ================= MODE 2: ROAD-FOLLOWING SIMULATION =================
+                RouteSimulationCard(
+                    startLatText = startLatText,
+                    startLonText = startLonText,
+                    endLatText = endLatText,
+                    endLonText = endLonText,
+                    onStartLatChange = {
+                        startLatText = it
+                        calculatedRoute = null // Invalidate previous route
+                        routingError = null
+                    },
+                    onStartLonChange = {
+                        startLonText = it
+                        calculatedRoute = null // Invalidate previous route
+                        routingError = null
+                    },
+                    onEndLatChange = {
+                        endLatText = it
+                        calculatedRoute = null // Invalidate previous route
+                        routingError = null
+                    },
+                    onEndLonChange = {
+                        endLonText = it
+                        calculatedRoute = null // Invalidate previous route
+                        routingError = null
+                    },
+                    onSetStartToCurrentPin = {
+                        startLatText = String.format(Locale.US, "%.6f", mapLatitude)
+                        startLonText = String.format(Locale.US, "%.6f", mapLongitude)
+                        calculatedRoute = null
+                        routingError = null
+                    },
+                    onSetStartToDeviceGps = {
+                        currentDeviceLocation?.let { (cLat, cLon) ->
+                            startLatText = String.format(Locale.US, "%.6f", cLat)
+                            startLonText = String.format(Locale.US, "%.6f", cLon)
+                            calculatedRoute = null
+                            routingError = null
+                        }
+                    },
+                    onSetEndToCurrentPin = {
+                        endLatText = String.format(Locale.US, "%.6f", mapLatitude)
+                        endLonText = String.format(Locale.US, "%.6f", mapLongitude)
+                        calculatedRoute = null
+                        routingError = null
+                    },
+                    calculatedRoute = calculatedRoute,
+                    isCalculatingRoute = isCalculatingRoute,
+                    routingError = routingError,
+                    onCalculateRoute = { onCalculateRouteClicked() },
+                    onClearRoute = {
+                        calculatedRoute = null
+                        routingError = null
+                    },
+                    selectedSpeedKmh = selectedSpeedKmh,
+                    onSpeedChange = { selectedSpeedKmh = it },
+                    followLocation = followLocation,
+                    onFollowLocationChange = { followLocation = it },
+                    isSimulating = isSimulatingRoute,
+                    isSimulationPaused = isSimulationPaused,
+                    simulationProgress = activeSimulationProgress,
+                    onStartSimulation = { onStartSimulationClicked() },
+                    onPauseSimulation = { LocationForegroundService.pauseRouteSimulation(context) },
+                    onResumeSimulation = { LocationForegroundService.resumeRouteSimulation(context) },
+                    onStopSimulation = { onStopClicked() }
+                )
             }
 
             // Saved Locations Section (Clean Bookmark Manager)
@@ -655,122 +957,8 @@ fun MainScreen(modifier: Modifier = Modifier) {
                 onOpenSaveDialog = {
                     showSaveDialog = true
                 },
-                isMockRunning = isRunning
+                isMockRunning = isAnyServiceRunning
             )
-
-            // Target Coordinates Input Card
-            ElevatedCard(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.elevatedCardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Target Coordinates",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-
-                        TextButton(
-                            onClick = { showSaveDialog = true },
-                            enabled = isInputValid && !isRunning
-                        ) {
-                            Text("★ Bookmark Spot")
-                        }
-                    }
-
-                    OutlinedTextField(
-                        value = latitudeText,
-                        onValueChange = {
-                            latitudeText = it
-                            localError = null
-                        },
-                        label = { Text("Latitude (°)") },
-                        placeholder = { Text("e.g. 13.0827 (-90 to 90)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isRunning
-                    )
-
-                    OutlinedTextField(
-                        value = longitudeText,
-                        onValueChange = {
-                            longitudeText = it
-                            localError = null
-                        },
-                        label = { Text("Longitude (°)") },
-                        placeholder = { Text("e.g. 80.2707 (-180 to 180)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isRunning
-                    )
-
-                    OutlinedTextField(
-                        value = accuracyText,
-                        onValueChange = {
-                            accuracyText = it
-                            localError = null
-                        },
-                        label = { Text("Accuracy (meters)") },
-                        placeholder = { Text("e.g. 5 (> 0)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isRunning
-                    )
-                }
-            }
-
-            // Start & Stop Mock Location Controls
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Button(
-                    onClick = { onStartClicked() },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(54.dp),
-                    enabled = isInputValid && !isRunning,
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Text(
-                        text = "Start Mock Location",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
-                    )
-                }
-
-                OutlinedButton(
-                    onClick = { onStopClicked() },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(54.dp),
-                    enabled = isRunning,
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error
-                    )
-                ) {
-                    Text(
-                        text = "Stop Mock Location",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
-                    )
-                }
-            }
 
             // Developer Options Guide Card
             Card(
@@ -889,10 +1077,22 @@ private fun StatusCard(serviceStatus: ServiceStatus, localError: String?) {
             MaterialTheme.colorScheme.onErrorContainer,
             "Error"
         )
+        serviceStatus is ServiceStatus.SimulatingRoute -> {
+            if (serviceStatus.isPaused) {
+                Triple(Color(0xFFF59E0B), Color.White, "Simulation Paused")
+            } else {
+                Triple(Color(0xFF16A34A), Color.White, "Simulating Route")
+            }
+        }
+        serviceStatus is ServiceStatus.RouteCompleted -> Triple(
+            Color(0xFF0284C7),
+            Color.White,
+            "Route Completed"
+        )
         serviceStatus is ServiceStatus.Running -> Triple(
             Color(0xFF2E7D32),
             Color.White,
-            "Running"
+            "Static Running"
         )
         else -> Triple(
             MaterialTheme.colorScheme.surfaceVariant,
@@ -907,6 +1107,7 @@ private fun StatusCard(serviceStatus: ServiceStatus, localError: String?) {
         colors = CardDefaults.cardColors(
             containerColor = when {
                 displayedError != null -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f)
+                serviceStatus is ServiceStatus.SimulatingRoute -> Color(0xFFEFF6FF)
                 serviceStatus is ServiceStatus.Running -> Color(0xFFE8F5E9)
                 else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
             }
@@ -927,7 +1128,6 @@ private fun StatusCard(serviceStatus: ServiceStatus, localError: String?) {
                     fontWeight = FontWeight.SemiBold
                 )
 
-                // Status Badge
                 Box(
                     modifier = Modifier
                         .clip(CircleShape)
@@ -955,11 +1155,35 @@ private fun StatusCard(serviceStatus: ServiceStatus, localError: String?) {
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )
+            } else if (serviceStatus is ServiceStatus.SimulatingRoute) {
+                val progress = serviceStatus.progress
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = String.format(Locale.US, "Speed: %.1f km/h | Bearing: %d° | Progress: %d%%", progress.speedKmh, progress.bearing.toInt(), (progress.progressFraction * 100).toInt()),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF0369A1),
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = String.format(Locale.US, "Lat: %.6f | Lon: %.6f (Remaining: %.2f km)", progress.currentPoint.latitude, progress.currentPoint.longitude, progress.remainingDistanceMeters / 1000.0),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Medium,
+                        color = Color(0xFF0C4A6E)
+                    )
+                }
+            } else if (serviceStatus is ServiceStatus.RouteCompleted) {
+                Text(
+                    text = String.format(Locale.US, "Destination reached! Total road distance covered: %.2f km", serviceStatus.route.distanceKm),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF0369A1)
+                )
             } else if (serviceStatus is ServiceStatus.Running) {
                 val loc = serviceStatus.location
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        text = "Broadcasting Coordinates (1 Hz):",
+                        text = "Broadcasting Static Coordinates (2 Hz):",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF1B5E20),
                         fontWeight = FontWeight.SemiBold

@@ -11,7 +11,7 @@ import com.example.locationspoofer.model.SpoofLocation
 /**
  * Manages Android LocationManager mock/test providers.
  * Registers GPS, Network, Passive, and Fused test providers with comprehensive
- * telemetry attributes to prevent location jumping / rubber-banding.
+ * telemetry attributes (bearing, speed, accuracy, timestamps) to prevent location jumping.
  */
 class MockLocationManager(private val context: Context) {
 
@@ -102,7 +102,11 @@ class MockLocationManager(private val context: Context) {
     /**
      * Publishes high-precision synthetic location updates to all active test providers.
      */
-    fun publishLocation(spoofLocation: SpoofLocation): Result<Unit> {
+    fun publishLocation(
+        spoofLocation: SpoofLocation,
+        bearing: Float = 0f,
+        speedMps: Float = 0f
+    ): Result<Unit> {
         if (!isConfigured || activeProviders.isEmpty()) {
             val configResult = startMocking()
             if (configResult.isFailure) return configResult
@@ -120,8 +124,8 @@ class MockLocationManager(private val context: Context) {
                     altitude = 15.0 // Non-zero altitude prevents elevation anomalies in FLP
                     time = currentTime
                     elapsedRealtimeNanos = currentElapsedNanos
-                    speed = 0.0f
-                    bearing = 0.0f
+                    this.speed = speedMps
+                    this.bearing = bearing
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         bearingAccuracyDegrees = 0.1f
